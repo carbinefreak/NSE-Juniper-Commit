@@ -1,0 +1,106 @@
+/*
+*		NSE Junos Commit Script for MPLS Standards verification and Enforcement
+*		Written By Joe Keen - Joseph.keen@motorolasolutions.com
+*
+*		v0.1 - Initial Verification of WAN interfaces
+*/
+
+version 1.0;
+ns junos = "http://xml.juniper.net/junos/*/junos";
+ns xnm = "http://xml.juniper.net/xnm/1.1/xnm";
+ns jcs = "http://xml.juniper.net/junos/commit-scripts/1.0";
+import "../import/junos.xsl";
+
+/* Variables */
+param $min-mtu = 2048;
+param $mpls-vlan = 300;
+param $astro-speed = '100m';
+param $astro-link-mode = 'full-duplex';
+param $astro-auto-mode = 'no-auto-negotiation';
+	
+match configuration {
+    var $top = .;
+    
+    
+    for-each (interfaces/interface/apply-macro[name = 'params']) {
+    	
+    	/* Paramaters from the interface configuration */
+        var $type = data[name = 'type']/value;
+        var $intf_name = ../name;
+        	
+        /* Global Checks */
+        /* Lets verify there are descriptions on the interfaces */
+        
+        call warning-if-missing($must = ../description, $statement = "[ interfaces " _ $intf_name _ " description ]") {
+        	with $message = {
+            	expr "interface descriptions are required please configure";
+         	}
+    	}
+        /* Lets check all WAN configuration settings */
+        if ($type = 'wan') {
+        	/* Check MTU, if not set or set too small warn and set */
+        	if (../mtu < $min-mtu or not(../mtu)) {
+            	call jcs:emit-change($dot = .., $tag = "change") {
+            		with $content = {
+            			<mtu> $min-mtu;
+            		}
+            		with $message = {
+            			expr "fixing invalid mtu set on wan interface, must be atleast " _ $min-mtu;
+            		}
+            	}
+			}
+			
+			/* Check family MPLS on mpls unit, if not set warn and set */
+        	if (not(../unit[name == $mpls-vlan]/family/mpls)) {
+            	call jcs:emit-change($dot = ../unit[name == $mpls-vlan], $tag = "change") {
+            		with $content = {
+            				<family> "mpls";
+            		}
+            		with $message = {
+            			expr "fixing missing family mpls on unit " _ $mpls-vlan;
+            		}
+            	}
+			}
+        }
+    }
+}
+
+template error-if-missing ($must, $statement = "unknown", $message = "missing mandatory configuration statement") {
+	 
+	if (not($must)) {
+	 	<xnm:error> {
+	 		<edit-path> {
+	 			copy-of $statement;
+	 			}
+	            <message> {
+	                copy-of $message;
+	            }
+	       }
+	}
+}
+template warning-if-missing ($must, $statement = "unknown", $message = "missing mandatory configuration statement") {
+	 
+	if (not($must)) {
+	 	<xnm:warning> {
+	 		<edit-path> {
+	 			copy-of $statement;
+	 			}
+	            <message> {
+	                copy-of $message;
+	            }
+	       }
+	}
+}
+template error-if-present ($must = 1, $message = "invalid configuration statement") {
+	 /* give error if param missing */
+	     
+	 for-each ($must) {
+	   <xnm:error> {
+	       call jcs:edit-path();
+	       call jcs:statement();
+	       <message> {
+	           copy-of $message;
+	       }
+	   }
+	}
+}
