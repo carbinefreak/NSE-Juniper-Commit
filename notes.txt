@@ -1,0 +1,24 @@
+Commit Script Checks
+----------------------------------------
+If interface is WAN
+
+- Verify MTU *COMPLETE!
+- Verify family MPLS
+- Verify QoS interface
+- Verify OSPF Auth and PtP
+- Verify mpls admin group is applied
+- Verify IP is set
+- Verify vlan-tagging
+- verify description *COMPLETE!
+
+
+
+If interface is astro
+
+- verify QoS interface
+- verify IP is set
+- verify Speed-duplex(100-F NO AUTO)
+- verify no OSPF
+- verify no MPLS
+- verify routing instance?
+- verify description
