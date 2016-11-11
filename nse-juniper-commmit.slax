@@ -2,7 +2,9 @@
 *		NSE Junos Commit Script for MPLS Standards verification and Enforcement
 *		Written By Joe Keen - Joseph.keen@motorolasolutions.com
 *
-*		v0.1 - Initial Verification of WAN interfaces
+*		v0.1 11/10/16 - Initial Verification of WAN interfaces
+*		v0.2 11/11/16 - added LAN verification
+*
 */
 
 version 1.0;
@@ -14,10 +16,6 @@ import "../import/junos.xsl";
 /* Variables */
 param $min-mtu = 2048;
 param $mpls-vlan = 300;
-param $astro-speed = '100m';
-param $wan-speed = '1g';
-param $astro-link-mode = 'full-duplex';
-param $astro-auto-mode = 'no-auto-negotiation';
 param $ospf-auth-key = "Batw1ngs-Adm1n1!";
 param $ospf-area = "0.0.0.0";
 param $bfd-minimum-interval = 50;
@@ -30,8 +28,6 @@ param $cos-ieee-rewrite = 'nse-ieee-802.1-rewrite';
 param $cos-egress-map = 'nse-egress-map';
 match configuration {
     var $top = .;
-    
-    
     for-each (interfaces/interface/apply-macro[name = 'params']) {
     	
     	/* Paramaters from the interface configuration */
@@ -47,16 +43,20 @@ match configuration {
         var $intf_phy_name = ../name;
         var $intf_unit_name = ../name _ '.' _ $mpls-vlan;
         	
-        /* Global Checks
-        Lets verify that we have all valid params for the interfaces */
+		/* 
+        *
+        *		Lets verify all supplied paramaters to make sure nobody put something invlaid
+        *
+        */
+        
         call verify-params($param = data[name == 'type']/value, $valid-value1 = "wan", $valid-value2 = "astro", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params type]") {
         	with $message = {
             	expr "please define the interface type, valid values are: 'wan' or 'astro'";
          	}
     	}
-        call verify-params($param = data[name == 'speed']/value, $valid-value1 = "auto", $valid-value2 = "1g", $valid-value3 = "100f", $valid-value4 = "10f", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params speed]") {
+        call verify-params($param = data[name == 'speed']/value, $valid-value1 = "auto", $valid-value2 = "100f", $valid-value3 = "10f", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params speed]") {
         	with $message = {
-            	expr "please define the interface speed, valid values are: 'auto', '1g', '100f' or '10f'";
+            	expr "please define the interface speed, valid values are: 'auto', '100f' or '10f'";
          	}
     	}
     	call verify-params($param = data[name == 'ospf-type']/value, $valid-value1 = "ptp", $valid-value2 = "normal", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params ospf-type]") {
@@ -70,13 +70,84 @@ match configuration {
          	}
     	}
     	
+    	
+    	/* 
+        *
+        *		Lets verify all global interface checks
+        *
+        */
+        
+    	
+    	
         /* Lets verify there are descriptions on the interfaces */
         call warning-if-missing($must = ../description, $statement = "[edit interfaces " _ $intf_phy_name _ " description]") {
         	with $message = {
             	expr "interface descriptions are required please configure";
          	}
     	}
-        /* Lets check all WAN configuration settings */
+    	
+    	/* Now lets check the speed/duplex settings */
+    	if ($speed = 'auto') {
+        	/* Check if speed, link-mode or no-auto is set, if not set warn and delete */
+        	if (../speed || ../link-mode || not(../gigether-options/auto-negotiation)) {
+        		var $current-speed = ../speed;
+        		var $current-link-mode = ../link-mode;
+            	call jcs:emit-change($dot = .., $tag = "change") {
+            		with $content = {
+            			<speed delete=$current-speed>;
+            			<link-mode delete=$current-link-mode>;
+            			<gigether-options> {
+            				<auto-negotiation>;
+            			}
+            		}
+            		with $message = {
+            			expr "fixing invalid speed and/or duplex set on wan interface " _ $intf_phy_name;
+            		}
+            	}
+			}
+    	}
+    	if ($speed = '100f') {
+        	/* Check if speed, link-mode or no-auto is set, if not set warn and delete */
+        	if (../speed != '100m' || ../link-mode != 'full-duplex' || not(../gigether-options/no-auto-negotiation) || not(../speed) || not(../link-mode)) {
+            	call jcs:emit-change($dot = .., $tag = "change") {
+            		with $content = {
+            			<speed> '100m';
+            			<link-mode> 'full-duplex';
+            			<gigether-options> {
+            				<no-auto-negotiation>;
+            			}
+            		}
+            		with $message = {
+            			expr "fixing invalid speed and/or duplex set on wan interface " _ $intf_phy_name;
+            		}
+            	}
+			}
+    	}
+    	if ($speed = '10f') {
+        	/* Check if speed, link-mode or no-auto is set, if not set warn and delete */
+        	if (../speed != '10m' || ../link-mode != 'full-duplex' || not(../gigether-options/no-auto-negotiation) || not(../speed) || not(../link-mode)) {
+            	call jcs:emit-change($dot = .., $tag = "change") {
+            		with $content = {
+            			<speed> '10m';
+            			<link-mode> 'full-duplex';
+            			<gigether-options> {
+            				<no-auto-negotiation>;
+            			}
+            		}
+            		with $message = {
+            			expr "fixing invalid speed and/or duplex set on wan interface " _ $intf_phy_name;
+            		}
+            	}
+			}
+    	}
+    	
+    	
+        /* 
+        *
+        *		Lets verify if this is a WAN interface
+        *
+        */
+        
         if ($type = 'wan') {
         	/* Check MTU, if not set or set too small warn and set */
         	if (../mtu < $min-mtu or not(../mtu)) {
@@ -114,65 +185,95 @@ match configuration {
             		expr "admin groups not configured for interface " _ $intf_unit_name;
          		}
 			}
-			/* Check OSPF Auth, set if not configured DO NOT TRY TO MATCH HASHES THEY ARE SALTED AND WILL SHOW DIFFRENTLY FOR EACH INTERFACE!*/
-        	if (not($ospf_node/interface[name == $intf_unit_name ]/authentication)) {
-            	call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+			/* Check if OSPF is even set.... if not set EVERYTHING*/
+        	if (not($ospf_node/interface[name == $intf_unit_name ])) {
+            	call jcs:emit-change($dot = $ospf_node, $tag = "change") {
             		with $content = {
-            			<authentication> {
-            				<md5> {
-            					<name> '1';
-                       	 		<key> $ospf-auth-key;
+            			<interface> {
+            				<name> $intf_unit_name;
+            				<interface-type> 'p2p';
+            				<bfd-liveness-detection> {
+                                <minimum-interval> $bfd-minimum-interval;
+                                <multiplier> $bfd-multiplier;
+                                <full-neighbors-only> '';
+                            }
+            				<authentication> {
+                                <md5> {
+                                    <name> '1';
+                                    <key> $ospf-auth-key;
+                                }
             				}
             			}
                     }
             		with $message = {
-            			expr "fixing missing ospf md5 authentication on interface " _ $intf_unit_name;
-            		}
-            	}
-			}
-			/* Check OSPF BFD matches our standard values*/
-        	if (not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection) || ($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/minimum-interval !=  $bfd-minimum-interval) || ($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/multiplier !=  $bfd-multiplier) || not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/full-neighbors-only) || not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/multiplier)) {
-            	call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
-            		with $content = {
-            			<bfd-liveness-detection> {
-            				<minimum-interval> $bfd-minimum-interval;
-            				<multiplier> $bfd-multiplier;
-            				<full-neighbors-only> '';
-            			}
-                    }
-            		with $message = {
-            			expr "fixing missing or incorrect ospf bfd interface " _ $intf_unit_name;
+            			expr "fixing missing ospf interface " _ $intf_unit_name;
             		}
             	}
 			}
 			
-			/* check if the OSPF type needs to be something other than "normal" */
-			if ($ospf-type == 'ptp') {
-				/* Check OSPF link type, if not set or incorrect set*/
-        		if (not($ospf_node/interface[name == $intf_unit_name ]/interface-type)) {
-            		call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
-            			with $content = {
-            				<interface-type> 'p2p';
-                    	}
-            			with $message = {
-            				expr "fixing missing ospf type on interface " _ $intf_unit_name;
-            			}
-            		}
-				}
+			/* if the interface exisits in OSPF we need to run some more checks */
+			if ($ospf_node/interface[name == $intf_unit_name ]) {
+			    /* Check OSPF Auth, set if not configured DO NOT TRY TO MATCH HASHES THEY ARE SALTED AND WILL SHOW DIFFRENTLY FOR EACH INTERFACE!*/
+                if (not($ospf_node/interface[name == $intf_unit_name ]/authentication)) {
+                    call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+                        with $content = {
+                            <authentication> {
+                                <md5> {
+                                    <name> '1';
+                                    <key> $ospf-auth-key;
+                                }
+                            }
+                        }
+                        with $message = {
+                            expr "fixing missing ospf md5 authentication on interface " _ $intf_unit_name;
+                        }
+                    }
+                }
+                /* Check OSPF BFD matches our standard values*/
+                if (not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection) || ($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/minimum-interval !=  $bfd-minimum-interval) || ($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/multiplier !=  $bfd-multiplier) || not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/full-neighbors-only) || not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/multiplier)) {
+                    call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+                        with $content = {
+                            <bfd-liveness-detection> {
+                                <minimum-interval> $bfd-minimum-interval;
+                                <multiplier> $bfd-multiplier;
+                                <full-neighbors-only> '';
+                            }
+                        }
+                        with $message = {
+                            expr "fixing missing or incorrect ospf bfd interface " _ $intf_unit_name;
+                        }
+                    }
+                }
+                
+                /* check if the OSPF type needs to be something other than "normal" */
+                if ($ospf-type == 'ptp') {
+                    /* Check OSPF link type, if not set or incorrect set*/
+                    if (not($ospf_node/interface[name == $intf_unit_name ]/interface-type)) {
+                        call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+                            with $content = {
+                                <interface-type> 'p2p';
+                            }
+                            with $message = {
+                                expr "fixing missing ospf type on interface " _ $intf_unit_name;
+                            }
+                        }
+                    }
+                }
+                else if ($ospf-type == 'normal') {
+                    /* Check OSPF link type, if set remove */
+                    if ($ospf_node/interface[name == $intf_unit_name ]/interface-type) {
+                        call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+                            with $content = {
+                                <interface-type delete='p2p'>;
+                            }
+                            with $message = {
+                                expr "removing ospf ptp type on interface " _ $intf_unit_name;
+                            }
+                        }
+                    }
+                }
 			}
-			else if ($ospf-type == 'normal') {
-				/* Check OSPF link type, if set remove */
-        		if ($ospf_node/interface[name == $intf_unit_name ]/interface-type) {
-            		call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
-            			with $content = {
-            				<interface-type delete='p2p'>;
-                    	}
-            			with $message = {
-            				expr "removing ospf ptp type on interface " _ $intf_unit_name;
-            			}
-            		}
-				}
-			}
+			
 			
 			/* Verify QoS interface settings depending on the hardware model check exp/dscp/ieee rewrite and exp/dscp classifiers */
 			if ($model == 'acx') {
@@ -254,6 +355,103 @@ match configuration {
 				
 			}
         }
+        
+        /* 
+        *
+        *		Lets verify if this is an Astro interface
+        *
+        */
+        if ($type = 'astro') {
+        	/* f interface is under protocols ospf, delete */
+        	if ($ospf_node/interface[name == $intf_unit_name ]) {
+				/* Found it... Removing */
+            	call jcs:emit-change($dot = $ospf_node, $tag = "change") {
+            		with $content = {
+            			<interface delete="delete"> {
+            				<name> $intf_unit_name;
+            			}
+                   	}
+            		with $message = {
+            			expr "removing ospf from astro interface " _ $intf_unit_name;
+            		}
+				}
+			}
+        	
+        	/* if interface is under protocols mpls, delete */
+        	if ($mpls_node/interface[name == $intf_unit_name ]) {
+				/* Found it... Removing */
+            	call jcs:emit-change($dot = $mpls_node, $tag = "change") {
+            		with $content = {
+            			<interface delete="delete"> {
+            				<name> $intf_unit_name;
+            			}
+                   	}
+            		with $message = {
+            			expr "removing " _ $intf_unit_name _ " interface from protocols mpls";
+            		}
+				}
+			}
+        	/* if interface is under protocols rsvp, delete */
+        	if ($rsvp_node/interface[name == $intf_unit_name ]) {
+				/* Found it... Removing */
+            	call jcs:emit-change($dot = $rsvp_node, $tag = "change") {
+            		with $content = {
+            			<interface delete="delete"> {
+            				<name> $intf_unit_name;
+            			}
+                   	}
+            		with $message = {
+            			expr "removing " _ $intf_unit_name _ " interface from protocols rsvp";
+            		}
+				}
+			}
+			
+			/* Verify QoS interface settings depending on the hardware model check dscp classifiers if there is extra configuration here don't worry about it */
+			if ($model == 'acx') {
+				if ( not($cos_node/interface[name == $intf_phy_name ]) || not($cos_node/interface[name == $intf_phy_name ]/classifiers/dscp) || ($cos_node/interface[name == $intf_phy_name ]/classifiers/dscp/name != $cos-dscp-classifier) ){ 
+					call jcs:emit-change($dot = $cos_node, $tag = "change") {
+            			with $content = {
+            				<interface> {
+            					<name> $intf_phy_name;
+                        		<classifiers> {
+                            		<dscp> {
+                            			<name> $cos-dscp-classifier;
+                            		}
+                        		}
+            				}
+                    	}
+            			with $message = {
+            				expr "configuring cos on interface " _ $intf_phy_name;
+            			}
+            		}
+				}
+				
+			}
+			
+			/* if its an MX platform all the operations are done under the unit, verify the dscp classifier */
+			if ($model == 'mx') {
+				if ( not($cos_node/interface[name == $intf_phy_name ])  ||  (not($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/classifiers/dscp) && not($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/classifiers/dscp)) ||  (($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/classifiers/dscp/name != $cos-dscp-classifier) && ($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/classifiers/dscp/name != $cos-dscp-classifier))) {
+					call jcs:emit-change($dot = $cos_node, $tag = "change") {
+            			with $content = {
+            				<interface> {
+            					<name> $intf_phy_name;
+                        		<unit> {
+                           	 		<name> '*';
+                        			<classifiers> {
+                            			<dscp> {
+                            				<name> $cos-dscp-classifier;
+                            			}
+                        			}
+                        		}
+            				}
+                    	}
+            			with $message = {
+            				expr "configuring cos on interface " _ $intf_phy_name;
+            			}
+            		}
+				}
+			}
+        } 
     }
 }
 template verify-params ($param, $valid-value1 = "unknown", $valid-value2 = "unknown", $valid-value3 = "unknown", $valid-value4 = "unknown", $statement = "unknown", $message = "missing mandatory configuration statement") {
