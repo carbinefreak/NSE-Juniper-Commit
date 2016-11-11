@@ -15,9 +15,19 @@ import "../import/junos.xsl";
 param $min-mtu = 2048;
 param $mpls-vlan = 300;
 param $astro-speed = '100m';
+param $wan-speed = '1g';
 param $astro-link-mode = 'full-duplex';
 param $astro-auto-mode = 'no-auto-negotiation';
-	
+param $ospf-auth-key = "Batw1ngs-Adm1n1!";
+param $ospf-area = "0.0.0.0";
+param $bfd-minimum-interval = 50;
+param $bfd-multiplier = 3;
+param $cos-dscp-classifier = 'nse-dscp-classifier';
+param $cos-exp-classifier = 'nse-exp-classifier';
+param $cos-dscp-rewrite = 'nse-dscp-rewrite';
+param $cos-exp-rewrite = 'nse-exp-rewrite';
+param $cos-ieee-rewrite = 'nse-ieee-802.1-rewrite';
+param $cos-egress-map = 'nse-egress-map';
 match configuration {
     var $top = .;
     
@@ -26,12 +36,42 @@ match configuration {
     	
     	/* Paramaters from the interface configuration */
         var $type = data[name = 'type']/value;
-        var $intf_name = ../name;
+        var $speed = data[name = 'speed']/value;
+        var $ospf-type = data[name = 'ospf-type']/value;
+        var $model = data[name = 'model']/value;
+    	var $ospf_node = ../../../protocols/ospf/area[name == $ospf-area];
+    	var $mpls_node = ../../../protocols/mpls;
+    	var $rsvp_node = ../../../protocols/rsvp;
+    	var $ldp_node = ../../../protocols/ldp;
+    	var $cos_node = ../../../class-of-service/interfaces;
+        var $intf_phy_name = ../name;
+        var $intf_unit_name = ../name _ '.' _ $mpls-vlan;
         	
-        /* Global Checks */
+        /* Global Checks
+        Lets verify that we have all valid params for the interfaces */
+        call verify-params($param = data[name == 'type']/value, $valid-value1 = "wan", $valid-value2 = "astro", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params type]") {
+        	with $message = {
+            	expr "please define the interface type, valid values are: 'wan' or 'astro'";
+         	}
+    	}
+        call verify-params($param = data[name == 'speed']/value, $valid-value1 = "auto", $valid-value2 = "1g", $valid-value3 = "100f", $valid-value4 = "10f", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params speed]") {
+        	with $message = {
+            	expr "please define the interface speed, valid values are: 'auto', '1g', '100f' or '10f'";
+         	}
+    	}
+    	call verify-params($param = data[name == 'ospf-type']/value, $valid-value1 = "ptp", $valid-value2 = "normal", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params ospf-type]") {
+        	with $message = {
+            	expr "please define the interface ospf-type, valid values are: 'ptp' or 'normal'";
+         	}
+    	}	
+        call verify-params($param = data[name == 'model']/value, $valid-value1 = "mx", $valid-value2 = "acx", $valid-value3 = "srx", $statement = "[edit interfaces " _ $intf_phy_name _ " apply-macro params ospf-type]") {
+        	with $message = {
+            	expr "please define the hardware model, valid values are: 'mx', 'acx' or 'srx'";
+         	}
+    	}
+    	
         /* Lets verify there are descriptions on the interfaces */
-        
-        call warning-if-missing($must = ../description, $statement = "[ interfaces " _ $intf_name _ " description ]") {
+        call warning-if-missing($must = ../description, $statement = "[edit interfaces " _ $intf_phy_name _ " description]") {
         	with $message = {
             	expr "interface descriptions are required please configure";
          	}
@@ -52,17 +92,183 @@ match configuration {
 			
 			/* Check family MPLS on mpls unit, if not set warn and set */
         	if (not(../unit[name == $mpls-vlan]/family/mpls)) {
-            	call jcs:emit-change($dot = ../unit[name == $mpls-vlan], $tag = "change") {
+            	call jcs:emit-change($dot = ../unit[name == $mpls-vlan]/family, $tag = "change") {
             		with $content = {
-            				<family> "mpls";
+            			<mpls>;
             		}
             		with $message = {
             			expr "fixing missing family mpls on unit " _ $mpls-vlan;
             		}
             	}
 			}
+			
+			/* Check address, if not set error out */
+			call error-if-missing($must = ../unit[name == $mpls-vlan]/family/inet/address, $statement = "[edit interfaces " _ $intf_phy_name _ " unit " _ $mpls-vlan _ " family inet]") {
+        		with $message = {
+            		expr "interface address is not configured";
+         		}
+			}
+         	/* Check admin groups on interfaces, if not set error out */
+			call error-if-missing($must = $mpls_node/interface[ name == $intf_unit_name]/admin-group, $statement = "[edit protocols mpls interface " _ $intf_unit_name _ " admin-group]") {
+        		with $message = {
+            		expr "admin groups not configured for interface " _ $intf_unit_name;
+         		}
+			}
+			/* Check OSPF Auth, set if not configured DO NOT TRY TO MATCH HASHES THEY ARE SALTED AND WILL SHOW DIFFRENTLY FOR EACH INTERFACE!*/
+        	if (not($ospf_node/interface[name == $intf_unit_name ]/authentication)) {
+            	call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+            		with $content = {
+            			<authentication> {
+            				<md5> {
+            					<name> '1';
+                       	 		<key> $ospf-auth-key;
+            				}
+            			}
+                    }
+            		with $message = {
+            			expr "fixing missing ospf md5 authentication on interface " _ $intf_unit_name;
+            		}
+            	}
+			}
+			/* Check OSPF BFD matches our standard values*/
+        	if (not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection) || ($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/minimum-interval !=  $bfd-minimum-interval) || ($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/multiplier !=  $bfd-multiplier) || not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/full-neighbors-only) || not($ospf_node/interface[name == $intf_unit_name ]/bfd-liveness-detection/multiplier)) {
+            	call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+            		with $content = {
+            			<bfd-liveness-detection> {
+            				<minimum-interval> $bfd-minimum-interval;
+            				<multiplier> $bfd-multiplier;
+            				<full-neighbors-only> '';
+            			}
+                    }
+            		with $message = {
+            			expr "fixing missing or incorrect ospf bfd interface " _ $intf_unit_name;
+            		}
+            	}
+			}
+			
+			/* check if the OSPF type needs to be something other than "normal" */
+			if ($ospf-type == 'ptp') {
+				/* Check OSPF link type, if not set or incorrect set*/
+        		if (not($ospf_node/interface[name == $intf_unit_name ]/interface-type)) {
+            		call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+            			with $content = {
+            				<interface-type> 'p2p';
+                    	}
+            			with $message = {
+            				expr "fixing missing ospf type on interface " _ $intf_unit_name;
+            			}
+            		}
+				}
+			}
+			else if ($ospf-type == 'normal') {
+				/* Check OSPF link type, if set remove */
+        		if ($ospf_node/interface[name == $intf_unit_name ]/interface-type) {
+            		call jcs:emit-change($dot = $ospf_node/interface[name == $intf_unit_name], $tag = "change") {
+            			with $content = {
+            				<interface-type delete='p2p'>;
+                    	}
+            			with $message = {
+            				expr "removing ospf ptp type on interface " _ $intf_unit_name;
+            			}
+            		}
+				}
+			}
+			
+			/* Verify QoS interface settings depending on the hardware model check exp/dscp/ieee rewrite and exp/dscp classifiers */
+			if ($model == 'acx') {
+				if ( not($cos_node/interface[name == $intf_phy_name ]) || not($cos_node/interface[name == $intf_phy_name ]/rewrite-rules/dscp) || not($cos_node/interface[name == $intf_phy_name ]/rewrite-rules/ieee-802.1) || not($cos_node/interface[name == $intf_phy_name ]/classifiers/dscp) || (not($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/exp) && not($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/exp)) || (($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/exp/name != $cos-exp-rewrite) && ($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/exp/name != $cos-exp-rewrite)) || ($cos_node/interface[name == $intf_phy_name ]/rewrite-rules/dscp/name != $cos-dscp-rewrite) || ($cos_node/interface[name == $intf_phy_name ]/rewrite-rules/ieee-802.1/rewrite-rule-name != $cos-ieee-rewrite)  || ($cos_node/interface[name == $intf_phy_name ]/classifiers/dscp/name != $cos-dscp-classifier)) { 
+					call jcs:emit-change($dot = $cos_node, $tag = "change") {
+            			with $content = {
+            				<interface> {
+            					<name> $intf_phy_name;
+            					<scheduler-map> $cos-egress-map;
+                        		<unit> {
+                           	 		<name> '*';
+                            		<rewrite-rules> {
+                                			<exp> {
+                                				<name> $cos-exp-rewrite;
+                                			}
+                            		}
+                        		}
+                        		<classifiers> {
+                            		<dscp> {
+                            			<name> $cos-dscp-classifier;
+                            		}
+                        		}
+								<rewrite-rules> {
+                           	 		<dscp> {
+                           	 			<name> $cos-dscp-rewrite;
+                           	 		}
+                          		  	<ieee-802.1> {
+                          		  		<rewrite-rule-name> $cos-ieee-rewrite;
+                          		  	}
+								}
+            				}
+                    	}
+            			with $message = {
+            				expr "configuring cos on interface " _ $intf_phy_name;
+            			}
+            		}
+				}
+				
+			}
+			
+			/* if its an MX platform all the operations are done under the unit */
+			if ($model == 'mx') {
+				if ( not($cos_node/interface[name == $intf_phy_name ])  ||  (not($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/dscp) && not($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/dscp)) ||  (not($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/exp) && not($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/exp))    ||  (not($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/ieee-802.1) && not($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/ieee-802.1))   ||  (not($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/classifiers/dscp) && not($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/classifiers/dscp))  ||  (not($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/classifiers/exp) && not($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/classifiers/exp))  ||  (($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/exp/name != $cos-exp-rewrite) && ($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/exp/name != $cos-exp-rewrite))  ||  (($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/dscp/name != $cos-dscp-rewrite) && ($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/dscp/name != $cos-dscp-rewrite))  ||  (($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/rewrite-rules/ieee-802.1/rewrite-rule-name != $cos-ieee-rewrite) && ($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/rewrite-rules/ieee-802.1/rewrite-rule-name != $cos-ieee-rewrite))  ||  (($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/classifiers/dscp/name != $cos-dscp-classifier) && ($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/classifiers/dscp/name != $cos-dscp-classifier))  ||  (($cos_node/interface[name == $intf_phy_name ]/unit[name == '*']/classifiers/exp/name != $cos-exp-classifier) && ($cos_node/interface[name == $intf_phy_name ]/unit[name == $mpls-vlan]/classifiers/exp/name != $cos-exp-classifier))) {
+					call jcs:emit-change($dot = $cos_node, $tag = "change") {
+            			with $content = {
+            				<interface> {
+            					<name> $intf_phy_name;
+            					<scheduler-map> $cos-egress-map;
+                        		<unit> {
+                           	 		<name> '*';
+                            		<rewrite-rules> {
+                                			<exp> {
+                                				<name> $cos-exp-rewrite;
+                                			}
+                                			<dscp> {
+                           	 					<name> $cos-dscp-rewrite;
+                           	 				}
+                           	 				<ieee-802.1> {
+                          		  				<rewrite-rule-name> $cos-ieee-rewrite;
+                          		  			}
+                            		}
+                        		
+                        			<classifiers> {
+                            			<dscp> {
+                            				<name> $cos-dscp-classifier;
+                            			}
+                            			<exp> {
+                                				<name> $cos-exp-rewrite;
+                                		}
+                        			}
+                        		}
+            				}
+                    	}
+            			with $message = {
+            				expr "configuring cos on interface " _ $intf_phy_name;
+            			}
+            		}
+				}
+				
+			}
         }
     }
+}
+template verify-params ($param, $valid-value1 = "unknown", $valid-value2 = "unknown", $valid-value3 = "unknown", $valid-value4 = "unknown", $statement = "unknown", $message = "missing mandatory configuration statement") {
+	 
+	if (not($param) || not(($param == $valid-value1 || $param == $valid-value2 || $param == $valid-value3 || $param == $valid-value4))) {
+	 	<xnm:error> {
+	 		<edit-path> {
+	 			copy-of $statement;
+	 			}
+	            <message> {
+	                copy-of $message;
+	                expr " supplied value was (" _ $param _  ")";
+	            }
+	       }
+	}
 }
 
 template error-if-missing ($must, $statement = "unknown", $message = "missing mandatory configuration statement") {
